@@ -16,13 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { createInstance } from 'i18next'
+import { I18nextProvider } from 'react-i18next'
 import { assert, describe, expect, test, vi } from 'vitest'
 
 import { combineBillingExpr } from '@/features/pricing/lib/billing-expr'
 import { evaluateBillingExpression } from '@/features/pricing/lib/billing-expression/runtime'
 
+import { BillingConditionValueInput } from '../billing-time-fields'
 import { TieredPricingEditor } from '../tiered-pricing-editor'
 
 const expression =
@@ -30,6 +33,261 @@ const expression =
 
 const chainedExpression =
   'len <= 32000 && c <= 200 ? tier("discount", p * 0.8 + c * 2 + cr * 0.16 + cc * 0.17) : len <= 32000 ? tier("short", p * 0.8 + c * 8 + cr * 0.16 + cc * 0.17) : len <= 128000 ? tier("mid", p * 1.2 + c * 16 + cr * 0.16 + cc * 0.17) : tier("long", p * 2.4 + c * 24 + cr * 0.16 + cc * 0.17)'
+
+test.each([
+  [
+    'gpt-6-sol',
+    'GPT',
+    'Cache create (30m) price',
+    'Cache create (12h) price',
+    'cc12h',
+  ],
+  [
+    'claude-sonnet',
+    'Claude',
+    'Cache create (5m) price',
+    'Cache create (1h) price',
+    'cc1h',
+  ],
+])(
+  'offers matching cache durations for %s and emits their own variables',
+  async (modelName, mode, shortLabel, longLabel, longVariable) => {
+    const onBillingExprChange = vi.fn()
+    render(
+      <TieredPricingEditor
+        modelName={modelName}
+        billingExpr='tier("base", p * 4 + c * 20 + cr * 0.4)'
+        requestRuleExpr=''
+        onBillingExprChange={onBillingExprChange}
+        onRequestRuleExprChange={vi.fn()}
+      />
+    )
+    expect(screen.getByRole('button', { name: mode })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+    expect(screen.getByRole('textbox', { name: shortLabel })).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: longLabel })).toBeDisabled()
+    expect(onBillingExprChange).not.toHaveBeenCalled()
+    const user = userEvent.setup()
+    await user.click(
+      screen.getByRole('checkbox', { name: `Include ${shortLabel}` })
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: shortLabel }), {
+      target: { value: '5' },
+    })
+    await user.click(
+      screen.getByRole('checkbox', { name: `Include ${longLabel}` })
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: longLabel }), {
+      target: { value: '10' },
+    })
+    expect(onBillingExprChange).toHaveBeenLastCalledWith(
+      `tier("base", p * 4 + c * 20 + cr * 0.4 + cc * 5 + ${longVariable} * 10)`
+    )
+    const opposite =
+      longVariable === 'cc1h'
+        ? 'Cache create (12h) price'
+        : 'Cache create (1h) price'
+    expect(
+      screen.queryByRole('textbox', { name: opposite })
+    ).not.toBeInTheDocument()
+  }
+)
+
+test('keeps Gemini cache reading separate from storage charges', () => {
+  const onBillingExprChange = vi.fn()
+  render(
+    <TieredPricingEditor
+      modelName='gemini-3-pro'
+      billingExpr='tier("base", p * 4 + c * 20 + cr * 0)'
+      requestRuleExpr=''
+      onBillingExprChange={onBillingExprChange}
+      onRequestRuleExprChange={vi.fn()}
+    />
+  )
+  expect(
+    screen.getByRole('button', { name: 'Generic / Gemini' })
+  ).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getByRole('textbox', { name: 'Cache read price' })).toHaveValue(
+    '0'
+  )
+  expect(
+    screen.queryByRole('textbox', { name: /Cache create/ })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.getByText(
+      'Gemini explicit cache storage is charged by cached tokens and retention time and must be accounted for separately.'
+    )
+  ).toBeVisible()
+  expect(onBillingExprChange).not.toHaveBeenCalled()
+})
+
+test('estimates GPT cache writes with matching durations and excludes hidden values after changing models', () => {
+  const props = {
+    billingExpr: 'tier("base", p * 4 + c * 20 + cr * 0.4 + cc * 5)',
+    requestRuleExpr: '',
+    onBillingExprChange: vi.fn(),
+    onRequestRuleExprChange: vi.fn(),
+  }
+  const view = render(<TieredPricingEditor {...props} modelName='gpt-model' />)
+  const estimator = within(
+    screen.getByRole('group', { name: 'Token estimator' })
+  )
+  fireEvent.change(
+    estimator.getByRole('spinbutton', { name: 'Cache Write (30m)' }),
+    {
+      target: { value: '1000' },
+    }
+  )
+  fireEvent.change(
+    estimator.getByRole('spinbutton', { name: 'Cache Write (12h)' }),
+    {
+      target: { value: '1000' },
+    }
+  )
+  expect(estimator.getByText(/Estimated cost/)).toHaveTextContent('$0.015')
+  expect(estimator.queryByLabelText('Cache Write (1h)')).not.toBeInTheDocument()
+
+  view.rerender(<TieredPricingEditor {...props} modelName='claude-model' />)
+  expect(screen.getByRole('button', { name: 'Claude' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(
+    estimator.getByRole('spinbutton', { name: 'Cache Write (5m)' })
+  ).toHaveValue(1000)
+  expect(
+    estimator.queryByLabelText('Cache Write (12h)')
+  ).not.toBeInTheDocument()
+  expect(estimator.getByText(/Estimated cost/)).toHaveTextContent('$0.005')
+})
+
+test('selects cache categories with the keyboard without adding prices until enabled', async () => {
+  const onBillingExprChange = vi.fn()
+  render(
+    <TieredPricingEditor
+      billingExpr='tier("base", p * 4 + c * 20)'
+      requestRuleExpr=''
+      onBillingExprChange={onBillingExprChange}
+      onRequestRuleExprChange={vi.fn()}
+    />
+  )
+  const user = userEvent.setup()
+  screen.getByRole('button', { name: 'GPT' }).focus()
+  await user.keyboard('{Enter}')
+  expect(screen.getByRole('button', { name: 'GPT' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(
+    screen.getByRole('textbox', { name: 'Cache create (30m) price' })
+  ).toBeDisabled()
+  expect(onBillingExprChange).not.toHaveBeenCalled()
+})
+
+test('opens mixed cache prices as custom and confirms removal before switching to GPT', async () => {
+  const source =
+    'tier("base", p * 4 + c * 20 + cr * 0.4 + cc1h * 5 + cc12h * 10 + img * 8)'
+  const onBillingExprChange = vi.fn()
+  render(
+    <TieredPricingEditor
+      modelName='gpt-model'
+      billingExpr={source}
+      requestRuleExpr=''
+      onBillingExprChange={onBillingExprChange}
+      onRequestRuleExprChange={vi.fn()}
+    />
+  )
+  expect(screen.getByRole('button', { name: 'Custom' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(
+    screen.getByRole('textbox', { name: 'Claude cache write (1h) price' })
+  ).toHaveValue('5')
+  expect(
+    screen.getByRole('textbox', { name: 'GPT cache write (12h) price' })
+  ).toHaveValue('10')
+  expect(onBillingExprChange).not.toHaveBeenCalled()
+  const user = userEvent.setup()
+  await user.click(screen.getByRole('button', { name: 'GPT' }))
+  const confirmation = within(screen.getByRole('alertdialog'))
+  expect(
+    confirmation.getByText(/Claude cache write \(1h\) price/)
+  ).toBeVisible()
+  expect(onBillingExprChange).not.toHaveBeenCalled()
+  await user.click(confirmation.getByRole('button', { name: 'Cancel' }))
+  expect(onBillingExprChange).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: 'GPT' }))
+  await user.click(
+    within(screen.getByRole('alertdialog')).getByRole('button', {
+      name: 'Switch method',
+    })
+  )
+  expect(onBillingExprChange).toHaveBeenLastCalledWith(
+    'tier("base", p * 4 + c * 20 + cr * 0.4 + cc12h * 10 + img * 8)'
+  )
+  await user.click(
+    screen.getByRole('checkbox', { name: 'Include Cache create (30m) price' })
+  )
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Cache create (30m) price' }),
+    { target: { value: '5' } }
+  )
+  expect(onBillingExprChange.mock.lastCall?.[0]).toContain('cc * 5')
+  expect(onBillingExprChange.mock.lastCall?.[0]).not.toContain('cc1h')
+})
+
+test.each([
+  ['zhCN', '星期一'],
+  ['zhTW', '星期一'],
+  ['en', 'Monday'],
+  ['fr', 'lundi'],
+  ['ru', 'понедельник'],
+  ['ja', '月曜日'],
+  ['vi', 'Thứ Hai'],
+  [
+    'invalid_locale',
+    new Intl.DateTimeFormat(undefined, {
+      weekday: 'long',
+      timeZone: 'UTC',
+    }).format(new Date('2026-01-05T00:00:00Z')),
+  ],
+])(
+  'formats weekdays for %s and updates after a language switch',
+  async (language, monday) => {
+    const translations = createInstance()
+    await translations.init({
+      lng: language,
+      fallbackLng: 'en',
+      resources: Object.fromEntries(
+        ['en', 'fr', language].map((code) => [
+          code,
+          { translation: { 'Condition value': 'Condition value' } },
+        ])
+      ),
+    })
+    const onChange = vi.fn()
+    render(
+      <I18nextProvider i18n={translations}>
+        <BillingConditionValueInput
+          probe='weekday'
+          value='1'
+          onChange={onChange}
+        />
+      </I18nextProvider>
+    )
+    expect(
+      screen.getByRole('combobox', { name: 'Condition value' })
+    ).toHaveTextContent(monday)
+    await act(() => translations.changeLanguage('fr'))
+    expect(
+      screen.getByRole('combobox', { name: 'Condition value' })
+    ).toHaveTextContent('lundi')
+    expect(onChange).not.toHaveBeenCalled()
+  }
+)
 
 test('shows chained tiers as peer rules and edits a later rule without changing precedence', async () => {
   const onBillingExprChange = vi.fn()
@@ -126,8 +384,8 @@ test('retains all pricing inputs and switches inside an expanded rule', async ()
     'Input price',
     'Output price',
     'Cache read price',
-    'Cache create price',
-    'Cache create (1h) price',
+    'Standard cache write price',
+    'Claude cache write (1h) price',
     'Image input price',
     'Image cache input price',
     'Image output price',
@@ -140,10 +398,12 @@ test('retains all pricing inputs and switches inside an expanded rule', async ()
     ).toBeVisible()
   }
   await user.click(
-    tier.getByRole('checkbox', { name: 'Include Cache create (1h) price' })
+    tier.getByRole('checkbox', {
+      name: 'Include Claude cache write (1h) price',
+    })
   )
   fireEvent.change(
-    tier.getByRole('textbox', { name: 'Cache create (1h) price' }),
+    tier.getByRole('textbox', { name: 'Claude cache write (1h) price' }),
     { target: { value: '0.3' } }
   )
   await user.click(
@@ -162,7 +422,7 @@ test('retains all pricing inputs and switches inside an expanded rule', async ()
   await user.click(tier.getByRole('combobox', { name: 'Tier billing mode' }))
   await user.click(screen.getByRole('option', { name: 'Per token' }))
   expect(
-    tier.getByRole('textbox', { name: 'Cache create (1h) price' })
+    tier.getByRole('textbox', { name: 'Claude cache write (1h) price' })
   ).toHaveValue('0.3')
   expect(
     tier.getByRole('checkbox', { name: 'Include Image cache input price' })
@@ -395,6 +655,49 @@ test('edits image cache pricing and preserves an explicitly free cache lane', ()
   expect(
     screen.getByRole('checkbox', { name: 'Include Image cache input price' })
   ).toBeChecked()
+})
+
+test('keeps an OpenAI 12-hour cache write price through edits and labels the default write as 30 minutes', async () => {
+  const source =
+    'tier("base", p * 10 + c * 40 + cr * 1 + cc * 12.5 + cc12h * 25)'
+  const onBillingExprChange = vi.fn()
+  render(
+    <TieredPricingEditor
+      billingExpr={source}
+      requestRuleExpr=''
+      onBillingExprChange={onBillingExprChange}
+      onRequestRuleExprChange={vi.fn()}
+    />
+  )
+  const user = userEvent.setup()
+  const tier = within(screen.getByRole('group', { name: 'Pricing tier base' }))
+  expect(
+    tier.getByRole('textbox', { name: 'Cache create (30m) price' })
+  ).toHaveValue('12.5')
+  expect(
+    tier.getByRole('textbox', { name: 'Cache create (12h) price' })
+  ).toHaveValue('25')
+  expect(
+    tier.queryByRole('checkbox', { name: 'Include Cache create (1h) price' })
+  ).not.toBeInTheDocument()
+  expect(onBillingExprChange).not.toHaveBeenCalled()
+
+  fireEvent.change(tier.getByRole('textbox', { name: 'Input price' }), {
+    target: { value: '11' },
+  })
+  expect(onBillingExprChange).toHaveBeenLastCalledWith(
+    source.replace('p * 10', 'p * 11')
+  )
+
+  await user.click(
+    tier.getByRole('checkbox', { name: 'Include Cache create (12h) price' })
+  )
+  expect(onBillingExprChange).toHaveBeenLastCalledWith(
+    'tier("base", p * 11 + c * 40 + cr * 1 + cc * 12.5)'
+  )
+  expect(
+    tier.getByRole('textbox', { name: 'Cache create (30m) price' })
+  ).toHaveValue('12.5')
 })
 
 describe('visual time billing editor', () => {
