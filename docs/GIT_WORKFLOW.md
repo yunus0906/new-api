@@ -93,23 +93,26 @@ echo "blocked: main 只镜像 upstream，请 git switch develop 后提交" >&2
 exit 1
 ```
 
-`.git/hooks/pre-push`（放行"本地 main 恰等于 upstream/main 且是快进"的镜像推送，其余推 main 一律拒绝）：
+`.git/hooks/pre-push`（只放行"本地 main 恰等于 upstream/main"的镜像推送，其余推 main 一律拒绝）：
 
 ```sh
 #!/bin/sh
-zero=0000000000000000000000000000000000000000
 up=$(git rev-parse --verify -q refs/remotes/upstream/main) || up=""
+zero=0000000000000000000000000000000000000000
 blocked=0
 while read -r lref lsha rref rsha; do
   [ "$rref" = "refs/heads/main" ] || continue
-  if [ -n "$up" ] && [ "$lsha" = "$up" ] && [ "$rsha" != "$zero" ] \
-     && git merge-base --is-ancestor "$rsha" "$lsha"; then
-    continue
+  if [ "$rsha" = "$zero" ]; then
+    continue                      # 删除远程 main 不拦（由人自己确认）
   fi
-  echo "blocked: 拒绝对 main 的非镜像推送（local=$lsha remote=$rsha）" >&2
+  if [ -n "$up" ] && [ "$lsha" = "$up" ]; then
+    continue                      # 本地 main 就是官方镜像，允许同步
+  fi
+  echo "blocked: main 必须等于 upstream/main 才能推送（local=$lsha upstream=$up）" >&2
   blocked=1
 done
 [ "$blocked" -eq 0 ] || exit 1
+exit 0
 ```
 
 校验换行（三个都必须是 `0`）：
