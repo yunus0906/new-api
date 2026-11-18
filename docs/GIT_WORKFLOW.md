@@ -77,7 +77,7 @@ git config --local push.default simple                  # 只推当前分支，�
 git config --local pull.ff only                         # 拒绝意外产生 merge 提交
 ```
 
-> 唯一例外：在 `develop` 上 `git pull` 遇到分叉时会因 `pull.ff=only` 失败。这是故意的，此时应该显式 `git merge`，看清在合什么。
+> 想更严格可以再加 `git config --local pull.ff only`：此后任何分叉的 `git pull` 都会直接失败，逼你显式 `git merge` 看清在合什么。代价是在 `develop` 上分叉时 `pull` 也会失败，这是故意的。
 
 ### 3.3 防误提交钩子（本地，只对你生效）
 
