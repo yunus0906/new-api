@@ -2,12 +2,13 @@
 
 本文面向以前端为主、Go 刚入门的开发者。你的线上环境已经部署完成，因此这里重点只覆盖本地开发、个性化内容修改、Fork 分支管理和日常同步官方更新。
 
-分支管理方案以 [ChatGPT-GitHub Fork.md](./ChatGPT-GitHub%20Fork.md) 为准。当前建议采用两条长期分支：
+分支管理方案以 [GIT_WORKFLOW.md](./GIT_WORKFLOW.md) 为准。仓库采用三条长期分支：
 
-- `main`：只同步官方仓库，不写自己的业务代码。
-- `custom`：自己的本地开发、测试和线上部署分支。
+- `main`：官方镜像，只同步 `upstream`，不写自己的业务代码。
+- `develop`：自己的本地开发、联调测试分支，所有 `feature/*` 都合并到这里。
+- `release`：部署分支，服务器只拉取它，只接受来自 `develop` 的快进合并。
 
-如果某个改动比较大，再临时从 `custom` 拉 `feature/*` 分支，完成后合并回 `custom`。
+如果某个改动比较大，从 `develop` 拉 `feature/*` 分支，完成后合并回 `develop`。
 
 ## 1. 本地需要安装什么
 
@@ -77,23 +78,23 @@ git merge upstream/main
 git push origin main
 ```
 
-### 3.2 创建或切换 custom 分支
+### 3.2 创建或切换 develop 分支
 
-如果还没有 `custom` 分支：
-
-```powershell
-git checkout -b custom main
-git push -u origin custom
-```
-
-如果已经有 `custom` 分支：
+`develop` 是日常开发分支，正常情况下已经存在。如果还没有：
 
 ```powershell
-git checkout custom
-git pull origin custom
+git checkout -b develop main
+git push -u origin develop
 ```
 
-后续你的个性化内容修改都在 `custom` 或 `feature/*` 分支上做，不直接改 `main`。
+如果已经有 `develop` 分支：
+
+```powershell
+git checkout develop
+git pull --ff-only origin develop
+```
+
+后续你的个性化内容修改都在 `develop` 或 `feature/*` 分支上做，不直接改 `main`。
 
 ## 4. 推荐启动方式：Docker 后端 + 本地前端
 
@@ -111,10 +112,10 @@ git pull origin custom
 git branch --show-current
 ```
 
-如果不是 `custom` 或你的 `feature/*` 分支，先切过去：
+如果不是 `develop` 或你的 `feature/*` 分支，先切过去：
 
 ```powershell
-git checkout custom
+git checkout develop
 ```
 
 启动后端、PostgreSQL、Redis：
@@ -222,8 +223,8 @@ bun run i18n:sync
 ### 7.1 每天开始开发
 
 ```powershell
-git checkout custom
-git pull origin custom
+git checkout develop
+git pull origin develop
 docker compose -f docker-compose.dev.yml up -d
 cd web/default
 bun run dev
@@ -273,39 +274,44 @@ docker compose -f docker-compose.dev.yml down -v
 
 ## 8. 同步官方更新
 
-根据 [ChatGPT-GitHub Fork.md](./ChatGPT-GitHub%20Fork.md) 的方案，官方更新先进入 `main`，再合并到 `custom`。
+根据 [GIT_WORKFLOW.md](./GIT_WORKFLOW.md) 的方案，官方更新自上而下流动：`upstream/main → main → develop → release`。
 
 ### 8.1 同步 main
 
+`main` 只做官方镜像，`pull`/`merge` 都只允许快进（fast-forward），永远不要在这里提交。
+
 ```powershell
+git fetch upstream --prune
 git checkout main
-git fetch upstream
-git merge upstream/main
+git merge --ff-only upstream/main
 git push origin main
 ```
 
-### 8.2 合并到 custom
+### 8.2 合并到 develop
 
 ```powershell
-git checkout custom
-git pull origin custom
+git checkout develop
 git merge main
 ```
 
-如果没有冲突，推送：
-
-```powershell
-git push origin custom
-```
-
-如果有冲突，解决冲突后：
+有冲突就在这里解决（`docker-compose.yml` 冲突保留本地版本：`git checkout --ours -- docker-compose.yml`）。解决后：
 
 ```powershell
 git status
 git add <解决冲突的文件>
 git commit
-git push origin custom
+git push origin develop
 ```
+
+### 8.3 自测通过后进 release
+
+```powershell
+git checkout release
+git merge --ff-only develop
+git push origin release
+```
+
+服务器始终拉取 `release`，不要拉 `main`。
 
 同步官方更新后，建议重新跑本地启动和前端检查：
 
@@ -320,22 +326,22 @@ bun run dev
 
 ## 9. 开发较大功能时的 feature 分支
 
-如果只是小文案、小样式，可以直接在 `custom` 改。
+如果只是小文案、小样式，可以直接在 `develop` 改。
 
-如果改动较大，从 `custom` 拉功能分支：
+如果改动较大，从 `develop` 拉功能分支：
 
 ```powershell
-git checkout custom
-git pull origin custom
+git checkout develop
+git pull origin develop
 git checkout -b feature/my-change
 ```
 
-开发完成后合并回 `custom`：
+开发完成后合并回 `develop`：
 
 ```powershell
-git checkout custom
+git checkout develop
 git merge feature/my-change
-git push origin custom
+git push origin develop
 ```
 
 确认不再需要功能分支后再删除：
@@ -479,7 +485,7 @@ git checkout -b feature/move-local-change
 本地开发：
 
 ```powershell
-git checkout custom
+git checkout develop
 docker compose -f docker-compose.dev.yml up -d
 cd web/default
 bun run dev
@@ -491,7 +497,7 @@ bun run dev
 git status
 git add <文件>
 git commit -m "自定义前端内容"
-git push origin custom
+git push origin develop
 ```
 
 同步官方更新：
@@ -502,9 +508,15 @@ git fetch upstream
 git merge upstream/main
 git push origin main
 
-git checkout custom
+git checkout develop
 git merge main
-git push origin custom
+git push origin develop
 ```
 
-线上部署分支保持使用 `custom`，不要直接部署 `main`。
+线上部署分支保持使用 `release`，不要直接部署 `main`。`release` 只接受来自 `develop` 的快进合并：
+
+```powershell
+git checkout release
+git merge --ff-only develop
+git push origin release
+```
