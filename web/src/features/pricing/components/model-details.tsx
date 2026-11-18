@@ -64,8 +64,9 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import { useBillingTime } from '../hooks/use-billing-time'
 import { usePricingData } from '../hooks/use-pricing-data'
-import type { ParsedTaskTier } from '../lib/billing-expr'
+import type { ParsedTaskTier, ParsedTier } from '../lib/billing-expr'
 import { formatBillingCondition } from '../lib/billing-expression/condition-display'
+import { getTierCachePricingMode } from '../lib/cache-pricing'
 import {
   formatTaskUsageUnitPrice,
   getDynamicPriceEntries,
@@ -79,7 +80,11 @@ import {
 } from '../lib/dynamic-price'
 import { parseTags } from '../lib/filters'
 import { getAvailableGroups, isTokenBasedModel } from '../lib/model-helpers'
-import { withPluginPricing } from '../lib/plugin-pricing'
+import {
+  withBasePricing,
+  withOrdinaryPricing,
+  withPluginPricing,
+} from '../lib/plugin-pricing'
 import { formatFixedPrice, formatGroupPrice } from '../lib/price'
 import {
   evaluateTaskUsageExamples,
@@ -91,7 +96,8 @@ import {
   hasSimpleTaskPricing,
   taskPriceLabel,
   taskUsageUnitLabel,
-  taskPricingConditions,
+  taskTierConditions,
+  pricingDisplayFallbackKey,
 } from '../lib/task-price-display'
 import type {
   ModelCapability,
@@ -273,31 +279,10 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
     staleTime: 60 * 1000,
   })
 
-  const groups = metricsQuery.data?.data.groups ?? []
-  const successRates = groups
-    .map((group) => group.success_rate)
-    .filter((rate) => Number.isFinite(rate))
-  const successRate =
-    successRates.length > 0
-      ? successRates.reduce((sum, rate) => sum + rate, 0) / successRates.length
-      : Number.NaN
-  const tpsValues = groups
-    .map((group) => group.avg_tps)
-    .filter((value) => value > 0)
-  const avgTps =
-    tpsValues.length > 0
-      ? tpsValues.reduce((sum, value) => sum + value, 0) / tpsValues.length
-      : 0
-  const latencyValues = groups
-    .map((group) => group.avg_latency_ms)
-    .filter((value) => value > 0)
-  const avgLatency =
-    latencyValues.length > 0
-      ? Math.round(
-          latencyValues.reduce((sum, value) => sum + value, 0) /
-            latencyValues.length
-        )
-      : 0
+  const summary = metricsQuery.data?.data.summary
+  const successRate = summary?.success_rate ?? Number.NaN
+  const avgTps = summary?.avg_tps ?? 0
+  const avgLatency = summary?.avg_latency_ms ?? 0
 
   return (
     <div className='bg-muted/20 grid overflow-hidden rounded-lg border sm:grid-cols-3 sm:divide-x'>
@@ -742,7 +727,12 @@ function PriceSection(props: {
               {t('Special billing expression')}
             </div>
             <p className='text-muted-foreground mt-1 text-xs'>
-              {t('Unable to parse structured pricing')}
+              {t(
+                pricingDisplayFallbackKey(
+                  dynamicSummary.rawExpression,
+                  props.model.billing_usage_schema
+                )
+              )}
             </p>
             <div className='mt-3'>
               <div className='text-muted-foreground mb-1 text-[10px] font-medium tracking-wider uppercase'>
@@ -971,10 +961,19 @@ function getDynamicPriceFields(
   tiers: DynamicPricingTier[],
   options: DynamicPriceOptions
 ) {
+  const cachePricingMode = getTierCachePricingMode(
+    tiers.filter((tier): tier is ParsedTier => !('unitPrices' in tier)),
+    options.modelName
+  )
   return [
     ...new Map(
       tiers
-        .flatMap((tier) => getDynamicPriceEntries(tier, options))
+        .flatMap((tier) =>
+          getDynamicPriceEntries(tier, {
+            ...options,
+            cachePricingMode,
+          })
+        )
         .map((entry) => [entry.field, entry])
     ).values(),
   ]
@@ -1012,20 +1011,32 @@ type GroupPricingSectionProps = {
   showRechargePrice?: boolean
 }
 
+// Plugin keys cannot start with an underscore, so this tab value is free.
+const ORDINARY_PRICING_TAB = '__model__'
+
 function GroupPricingSection(props: GroupPricingSectionProps) {
   const { t } = useTranslation()
   const variants = props.model.billing_plugin_variants
   if (!variants?.length) {
     return <ProviderGroupPricingSection {...props} />
   }
+  const ordinary = props.model.ordinary_pricing
   return (
     <section>
       <SectionTitle>{t('Pricing by Group')}</SectionTitle>
-      <Tabs key={props.model.model_name} defaultValue={variants[0].plugin_key}>
+      <Tabs
+        key={props.model.model_name}
+        defaultValue={ordinary ? ORDINARY_PRICING_TAB : variants[0].plugin_key}
+      >
         <TabsList
           aria-label={t('Provider')}
           className='max-w-full flex-wrap justify-start group-data-horizontal/tabs:h-auto'
         >
+          {ordinary && (
+            <TabsTrigger value={ORDINARY_PRICING_TAB}>
+              {t('Default price')}
+            </TabsTrigger>
+          )}
           {variants.map((variant) => (
             <TabsTrigger
               key={variant.plugin_key}
@@ -1046,6 +1057,15 @@ function GroupPricingSection(props: GroupPricingSectionProps) {
             </TabsTrigger>
           ))}
         </TabsList>
+        {ordinary && (
+          <TabsContent value={ORDINARY_PRICING_TAB}>
+            <ProviderGroupPricingSection
+              {...props}
+              model={withOrdinaryPricing(props.model)}
+              hideTitle
+            />
+          </TabsContent>
+        )}
         {variants.map((variant) => (
           <TabsContent key={variant.plugin_key} value={variant.plugin_key}>
             {variant.billing_expr || variant.billing_mode === 'ratio' ? (
@@ -1148,7 +1168,10 @@ function ProviderGroupPricingSection(
             </div>
             <p className='text-muted-foreground mt-1 text-xs'>
               {t(
-                'Group prices cannot be expanded because this expression is not a standard tiered pricing expression.'
+                pricingDisplayFallbackKey(
+                  props.model.billing_expr || '',
+                  props.model.billing_usage_schema
+                )
               )}
             </p>
             <div className='mt-3'>
@@ -1170,6 +1193,7 @@ function ProviderGroupPricingSection(
       props.model.billing_usage_examples
     )
     const priceFields = getDynamicPriceFields(dynamicTiers, {
+      modelName: props.model.model_name,
       tokenUnit: props.tokenUnit,
       showRechargePrice,
       priceRate: props.priceRate,
@@ -1183,6 +1207,7 @@ function ProviderGroupPricingSection(
         return [
           group,
           getDynamicFormattedPricesByTier(dynamicTiers, {
+            modelName: props.model.model_name,
             tokenUnit: props.tokenUnit,
             showRechargePrice,
             priceRate: props.priceRate,
@@ -1221,7 +1246,7 @@ function ProviderGroupPricingSection(
                   headerRowClassName='hover:bg-transparent'
                   data={dynamicTiers}
                   getRowKey={(tier, tierIndex) =>
-                    `${group}-${tier.label || tierIndex}`
+                    `${group}-${tier.label}-${tierIndex}`
                   }
                   columns={[
                     ...(hasSimpleTaskPricing(props.model)
@@ -1238,8 +1263,8 @@ function ProviderGroupPricingSection(
                             cell: (tier: DynamicPricingTier) => {
                               if ('unitPrices' in tier) {
                                 return (
-                                  taskPricingConditions(
-                                    (tier as ParsedTaskTier).conditions,
+                                  taskTierConditions(
+                                    tier as ParsedTaskTier,
                                     props.model.billing_usage_schema,
                                     i18n.language,
                                     t
@@ -1345,7 +1370,7 @@ function ProviderGroupPricingSection(
               (tier) => 'unitPrices' in tier || tier.billingUnit === 'request'
             )
               ? t('Prices shown per usage unit')
-              : `${t('Prices shown per')} ${tokenUnitLabel} tokens`}
+              : t('Prices shown per {{unit}} tokens', { unit: tokenUnitLabel })}
           </p>
         </div>
       </section>
@@ -1448,7 +1473,7 @@ function ProviderGroupPricingSection(
       <div className='-mx-4 sm:mx-0'>
         {isTokenBased && (
           <p className='text-muted-foreground/40 mt-1.5 px-4 text-[10px] sm:px-0'>
-            {t('Prices shown per')} {tokenUnitLabel} tokens
+            {t('Prices shown per {{unit}} tokens', { unit: tokenUnitLabel })}
           </p>
         )}
       </div>
@@ -1483,18 +1508,20 @@ export interface ModelDetailsContentProps {
 export function ModelDetailsContent(props: ModelDetailsContentProps) {
   const { t } = useTranslation()
   const showRechargePrice = props.showRechargePrice ?? false
+  // The group pricing tabs list a model-level base price beside the plugin
+  // prices.
+  const baseModel = useMemo(() => withBasePricing(props.model), [props.model])
 
   const isDynamic =
-    props.model.billing_mode === 'tiered_expr' &&
-    Boolean(props.model.billing_expr)
+    baseModel.billing_mode === 'tiered_expr' && Boolean(baseModel.billing_expr)
 
-  const simpleTaskPricing = hasSimpleTaskPricing(props.model)
+  const simpleTaskPricing = hasSimpleTaskPricing(baseModel)
   const taskTiers = getTaskPricingDisplayTiers(
-    props.model.billing_expr,
-    props.model.billing_usage_schema
+    baseModel.billing_expr,
+    baseModel.billing_usage_schema
   )
   const showBasePrices =
-    !props.model.billing_usage_schema ||
+    !baseModel.billing_usage_schema ||
     simpleTaskPricing ||
     taskTiers.length === 0
 
@@ -1526,7 +1553,7 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
             <SectionTitle>{t('Pricing')}</SectionTitle>
             {showBasePrices && (
               <PriceSection
-                model={props.model}
+                model={baseModel}
                 priceRate={props.priceRate}
                 usdExchangeRate={props.usdExchangeRate}
                 tokenUnit={props.tokenUnit}
@@ -1535,8 +1562,9 @@ export function ModelDetailsContent(props: ModelDetailsContentProps) {
             )}
             {isDynamic && !simpleTaskPricing && (
               <DynamicPricingBreakdown
-                billingExpr={props.model.billing_expr}
-                usageSchema={props.model.billing_usage_schema}
+                modelName={baseModel.model_name}
+                billingExpr={baseModel.billing_expr}
+                usageSchema={baseModel.billing_usage_schema}
                 taskPriceOptions={{
                   showRechargePrice,
                   priceRate: props.priceRate,

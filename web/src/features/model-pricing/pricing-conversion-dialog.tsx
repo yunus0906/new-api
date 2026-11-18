@@ -76,7 +76,10 @@ export function PricingConversionDialog(props: {
     splitBillingExprAndRequestRules(props.preview.expression).billingExpr
   )
   const afterRows = tiers.flatMap((tier, index) =>
-    getDynamicPriceEntries(tier, { tokenUnit: 'M' }).map((row) => ({
+    getDynamicPriceEntries(tier, {
+      tokenUnit: 'M',
+      modelName: props.preview.modelName,
+    }).map((row) => ({
       ...row,
       key: `${index}-${row.key}`,
       tierLabel: tiers.length > 1 ? t(tier.conditionText || tier.label) : '',
@@ -112,7 +115,7 @@ export function PricingConversionDialog(props: {
       )}
       confirmText={t('Apply to draft')}
       handleConfirm={props.onConfirm}
-      className='max-h-[90vh] overflow-y-auto data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-5xl'
+      className='max-h-[min(90dvh,var(--dialog-available-height))] overflow-y-auto data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-5xl'
     >
       <p className='font-mono text-sm break-all'>{props.preview.modelName}</p>
       <div className='grid min-w-0 gap-4 md:grid-cols-2'>
